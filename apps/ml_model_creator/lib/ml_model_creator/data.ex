@@ -1,4 +1,4 @@
-defmodule FineTuner.Data do
+defmodule MlModelCreator.Data do
   import Nx.Defn
   alias Explorer.{DataFrame, Series}
 
@@ -44,7 +44,7 @@ defmodule FineTuner.Data do
       Map.fetch!(result_map, x)
     end)
     |> Explorer.Series.to_list()
-    |>  Nx.tensor()
+    |> Nx.tensor()
   end
 
   defn normalize_features(tensor) do

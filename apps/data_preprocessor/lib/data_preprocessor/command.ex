@@ -15,33 +15,37 @@ defmodule DataPreprocessor.Command do
   def run(command)
 
   def run({:initialize, country, season}) do
-    {:ok, _pid} = Task.Supervisor.start_child(DataPreprocessor.TaskSupervisor, fn ->
-      DataPreprocessor.Initializer.init(country, season)
-    end)
+    {:ok, _pid} =
+      Task.Supervisor.start_child(DataPreprocessor.TaskSupervisor, fn ->
+        DataPreprocessor.Initializer.init(country, season)
+      end)
 
     {:ok, "STARTED - #{country} #{season} Initialization\r\n"}
   end
 
   def run({:initialize, season}) do
-    {:ok, _pid} = Task.Supervisor.start_child(DataPreprocessor.TaskSupervisor, fn ->
-      DataPreprocessor.Initializer.init(season)
-    end)
+    {:ok, _pid} =
+      Task.Supervisor.start_child(DataPreprocessor.TaskSupervisor, fn ->
+        DataPreprocessor.Initializer.init(season)
+      end)
 
     {:ok, "STARTED - #{season} Initialization\r\n"}
   end
 
   def run({:initialize}) do
-    {:ok, _pid} = Task.Supervisor.start_child(DataPreprocessor.TaskSupervisor, fn ->
-      DataPreprocessor.Initializer.init()
-    end)
+    {:ok, _pid} =
+      Task.Supervisor.start_child(DataPreprocessor.TaskSupervisor, fn ->
+        DataPreprocessor.Initializer.init()
+      end)
 
     {:ok, "STARTED - Global Initialization\r\n"}
   end
 
   def run({:rank, country, season, league}) do
-    {:ok, _pid} = Task.Supervisor.start_child(DataPreprocessor.TaskSupervisor, fn ->
-      DataPreprocessor.Ranker.rank(country, season, league)
-    end)
+    {:ok, _pid} =
+      Task.Supervisor.start_child(DataPreprocessor.TaskSupervisor, fn ->
+        DataPreprocessor.Ranker.rank(country, season, league)
+      end)
 
     {:ok, "STARTED - Ranking campaign #{country}_#{season}_#{league}\r\n"}
   end

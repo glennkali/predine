@@ -1,24 +1,20 @@
-defmodule FineTuner do
+defmodule MlModelCreator do
   alias Explorer.{DataFrame}
   require Logger
 
-  def run() do
-    Task.Supervisor.async(FineTuner.TaskSupervisor, fn ->
-      create_model()
-    end)
-    |> Task.await()
-  end
-
-  def create_model() do
+  def create() do
     Logger.info("Starting the model creation process")
 
     Logger.info("Loading the data from the database")
-    {:ok, df}  = load_data()
+    {:ok, df} = load_data()
 
     Logger.info("Preprocessing the data and splitting the training and testing sets")
-    {:ok, [normalized_train_inputs, normalized_test_inputs, train_targets, test_targets]} = preprocess_data(df)
+
+    {:ok, [normalized_train_inputs, normalized_test_inputs, train_targets, test_targets]} =
+      preprocess_data(df)
 
     Logger.info("Instantiating the model")
+
     model =
       Axon.input("input")
       |> Axon.dense(256)
@@ -42,17 +38,21 @@ defmodule FineTuner do
   end
 
   def load_data() do
-    Adbc.download_driver!(:postgresql, uri: "postgresql://postgres:toorroot@localhost:5432/sports")
+    Adbc.download_driver!(:postgresql,
+      uri: "postgresql://postgres:toorroot@localhost:5432/sports"
+    )
+
     {:ok, db} =
       Kino.start_child(
         {Adbc.Database,
-        driver: :postgresql, uri: "postgresql://postgres:toorroot@localhost:5432/sports"}
+         driver: :postgresql, uri: "postgresql://postgres:toorroot@localhost:5432/sports"}
       )
 
     {:ok, conn} = Kino.start_child({Adbc.Connection, database: db})
 
     # query to load data
-    query = "SELECT tseh.old_rating as home_old_rating, tsea.old_rating as away_old_rating, f.full_time_result, f.odds_home_bet365, f.odds_draw_bet365, f.odds_away_bet365
+    query =
+      "SELECT tseh.old_rating as home_old_rating, tsea.old_rating as away_old_rating, f.full_time_result, f.odds_home_bet365, f.odds_draw_bet365, f.odds_away_bet365
     FROM public.fixtures as f
     JOIN public.team_statistics as tsh
     ON f.home_team_id = tsh.team_id
@@ -72,20 +72,22 @@ defmodule FineTuner do
   end
 
   def preprocess_data(df) do
-    {train_df, test_df} = FineTuner.Data.split_train_test(df, 0.8)
-    {train_features, train_targets} = FineTuner.Data.split_features_targets(train_df)
-    {test_features, test_targets} = FineTuner.Data.split_features_targets(test_df)
+    {train_df, test_df} = MlModelCreator.Data.split_train_test(df, 0.8)
+    {train_features, train_targets} = MlModelCreator.Data.split_features_targets(train_df)
+    {test_features, test_targets} = MlModelCreator.Data.split_features_targets(test_df)
 
-    normalized_train_inputs = train_features
-    |> FineTuner.Data.df_to_tensor()
-    |> FineTuner.Data.normalize_features()
+    normalized_train_inputs =
+      train_features
+      |> MlModelCreator.Data.df_to_tensor()
+      |> MlModelCreator.Data.normalize_features()
 
-    normalized_test_inputs = test_features
-    |> FineTuner.Data.df_to_tensor()
-    |> FineTuner.Data.normalize_features()
+    normalized_test_inputs =
+      test_features
+      |> MlModelCreator.Data.df_to_tensor()
+      |> MlModelCreator.Data.normalize_features()
 
-    train_targets = FineTuner.Data.convert_to_tensor(train_targets)
-    test_targets = FineTuner.Data.convert_to_tensor(test_targets)
+    train_targets = MlModelCreator.Data.convert_to_tensor(train_targets)
+    test_targets = MlModelCreator.Data.convert_to_tensor(test_targets)
 
     {:ok, [normalized_train_inputs, normalized_test_inputs, train_targets, test_targets]}
   end
@@ -96,7 +98,11 @@ defmodule FineTuner do
     batched_train = Stream.zip(batched_train_inputs, batched_train_targets)
 
     model
-    |> Axon.Loop.trainer(:categorical_cross_entropy, Polaris.Optimizers.adam(learning_rate: 1.0e-4), log: 1)
+    |> Axon.Loop.trainer(
+      :categorical_cross_entropy,
+      Polaris.Optimizers.adam(learning_rate: 1.0e-4),
+      log: 1
+    )
     |> Axon.Loop.run(batched_train, %{}, epochs: 30, compiler: EXLA)
   end
 
@@ -119,7 +125,7 @@ defmodule FineTuner do
   end
 
   def export_model(model, params) do
-    _template = Nx.to_template({2048,5})
+    _template = Nx.to_template({2048, 5})
     # AxonOnnx.export(model, template, params)
   end
 end

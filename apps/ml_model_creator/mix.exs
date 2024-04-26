@@ -1,9 +1,9 @@
-defmodule FineTuner.MixProject do
+defmodule MlModelCreator.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :fine_tuner,
+      app: :ml_model_creator,
       version: "0.0.1",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
@@ -18,7 +18,7 @@ defmodule FineTuner.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      mod: {FineTuner.Application, []},
+      mod: {MlModelCreator.Application, []},
       extra_applications: [:logger, :runtime_tools]
     ]
   end
@@ -39,7 +39,7 @@ defmodule FineTuner.MixProject do
       {:kino_vega_lite, "~> 0.1.9"},
       {:kino, "~> 0.10.0"},
       {:kino_explorer, "~> 0.1.7"},
-      {:adbc, "~>0.1"},
+      {:adbc, "~>0.1"}
     ]
   end
 end

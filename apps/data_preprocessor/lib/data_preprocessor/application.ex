@@ -8,10 +8,10 @@ defmodule DataPreprocessor.Application do
     children = [
       DataPreprocessor.Repo,
       {Task.Supervisor, name: DataPreprocessor.TaskSupervisor},
-      Supervisor.child_spec({Task, fn -> DataPreprocessor.accept(port) end}, restart: :permanent),
+      Supervisor.child_spec({Task, fn -> DataPreprocessor.accept(port) end}, restart: :permanent)
     ]
 
-    opts = [strategy: :one_for_one, name: DataPreprocessor.Supervisor]
+    opts = [strategy: :one_for_all, name: DataPreprocessor.Supervisor]
     Supervisor.start_link(children, opts)
   end
 end
