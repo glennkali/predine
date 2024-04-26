@@ -1,0 +1,276 @@
+<!-- livebook:{"app_settings":{"access_type":"public","slug":"prediction-engine"}} -->
+
+# Soccer Prediction Analysis
+
+```elixir
+Mix.install([
+  {:scholar, "~> 0.2.0"},
+  {:explorer, "~> 0.8.2"},
+  {:exla, "~> 0.6.0"},
+  {:nx, "~> 0.6.0", override: true},
+  {:req, "~> 0.3.9"},
+  {:kino_vega_lite, "~> 0.1.9"},
+  {:kino, "~> 0.10.0"},
+  {:kino_explorer, "~> 0.1.7"},
+  {:adbc, "~> 0.1"},
+  {:axon, "~> 0.6"}
+])
+```
+
+## Linear Regression Analysis
+
+```elixir
+alias VegaLite, as: Vl
+require Explorer.DataFrame, as: DF
+require Explorer.Series, as: S
+alias Scholar.Linear.LinearRegression, as: LR
+alias Scholar.Linear.LogisticRegression, as: LOR
+alias Scholar.Linear.PolynomialRegression, as: PR
+alias Scholar.Impute.SimpleImputer
+alias Scholar.Metrics.Regression
+alias Scholar.Cluster.KMeans
+Nx.global_default_backend(EXLA.Backend)
+seed = 42
+key = Nx.Random.key(42)
+
+Adbc.download_driver!(:postgresql, uri: "postgresql://postgres:toorroot@localhost:5432/sports")
+
+{:ok, db} =
+  Kino.start_child(
+    {Adbc.Database,
+     driver: :postgresql, uri: "postgresql://postgres:toorroot@localhost:5432/sports"}
+  )
+
+{:ok, conn} = Kino.start_child({Adbc.Connection, database: db})
+```
+
+```elixir
+# query to load data
+query =
+  "SELECT tseh.old_rating as home_old_rating, tsea.old_rating as away_old_rating, f.full_time_result, f.odds_home_bet365, f.odds_draw_bet365, f.odds_away_bet365
+FROM public.fixtures as f
+JOIN public.team_statistics as tsh
+ON f.home_team_id = tsh.team_id
+JOIN public.team_statistics as tsa
+ON f.away_team_id = tsa.team_id
+JOIN public.team_statistic_events as tseh
+ON f.id = tseh.fixture_id AND tsh.id = tseh.team_statistic_id
+JOIN public.team_statistic_events as tsea
+ON f.id = tsea.fixture_id AND tsa.id = tsea.team_statistic_id
+ORDER BY f.id"
+
+# When using the conn PID directly
+{:ok, df} = DF.from_query(conn, query, [])
+```
+
+```elixir
+# Increase the sample size (or use 1.0 to plot all data)
+sample = DF.sample(df, 0.2, seed: seed)
+
+Vl.new(
+  title: [
+    text: "Univariate Histograms of all features",
+    anchor: :middle
+  ],
+  width: 500,
+  height: 500,
+  columns: 3
+)
+|> Vl.data_from_values(sample)
+|> Vl.concat(
+  for name <- df.names do
+    Vl.new()
+    |> Vl.mark(:bar)
+    |> Vl.encode_field(:x, name, bin: [bin: true, maxbins: 50], axis: [ticks: false])
+    |> Vl.encode_field(:y, "value count", aggregate: :count)
+  end
+)
+```
+
+```elixir
+df =
+  DF.mutate(df,
+    home_rating_delta: home_old_rating - away_old_rating,
+    away_rating_delta: away_old_rating - home_old_rating
+  )
+```
+
+```elixir
+# Replace all nils with :nan so we are able to convert to tensor.
+names =
+  df
+  |> DF.names()
+  |> List.delete("full_time_result")
+
+after_preprocessing = for name <- names, into: %{}, do: {name, S.fill_missing(df[name], :nan)}
+
+preprocessed_data = DF.new(after_preprocessing)
+
+mapping_result = %{
+  "H" => 1.0,
+  "D" => 0.0,
+  "A" => -1.0
+}
+
+mapped_result = S.transform(df["full_time_result"], fn x -> Map.fetch!(mapping_result, x) end)
+df = DF.put(preprocessed_data, :full_time_result, mapped_result)
+```
+
+```elixir
+# Shuffle data to make splitting more resonable
+{num_rows, _num_cols} = DF.shape(df)
+
+indices = Nx.iota({num_rows})
+{permutation_indices, _} = Nx.Random.shuffle(key, Nx.iota({num_rows}), axis: 0)
+
+y =
+  df[["full_time_result"]]
+  |> Nx.concatenate()
+  |> Nx.take(permutation_indices)
+
+x =
+  df
+  |> DF.discard("full_time_result")
+  |> Nx.stack(axis: 1)
+  |> Nx.take(permutation_indices)
+
+{x, y}
+```
+
+```elixir
+train_ratio = 0.8
+
+{x_train, x_test} = Nx.split(x, train_ratio)
+{y_train, y_test} = Nx.split(y, train_ratio)
+```
+
+```elixir
+y_nan_count = Nx.sum(Nx.is_nan(y))
+x_nan_count = Nx.sum(Nx.is_nan(x))
+{x_nan_count, y_nan_count}
+```
+
+```elixir
+{odds_start_idx, odds_end_idx} = {4, 0}
+odds_start_nan_count = Nx.sum(Nx.is_nan(x[[.., odds_start_idx]]))
+odds_end_nan_count = Nx.sum(Nx.is_nan(x[[.., odds_end_idx]]))
+Nx.equal(x_nan_count, Nx.add(odds_start_nan_count, odds_end_nan_count))
+```
+
+```elixir
+x_train =
+  x_train
+  |> SimpleImputer.fit(strategy: :median)
+  |> SimpleImputer.transform(x_train)
+
+x_test =
+  x_test
+  |> SimpleImputer.fit(strategy: :median)
+  |> SimpleImputer.transform(x_test)
+```
+
+```elixir
+correlation =
+  Nx.concatenate([x_train, Nx.new_axis(y_train, 1)], axis: 1)
+  |> Scholar.Covariance.correlation_matrix(biased: true)
+```
+
+```elixir
+{corr_size, _} = Nx.shape(correlation)
+correlation_list = Nx.to_flat_list(correlation)
+
+names = [
+  "Away old rating",
+  "Away rating delta",
+  "Home old rating",
+  "Home rating delta",
+  "Odds away Bet365",
+  "Odds draw Bet365",
+  "Odds home Bet365",
+  "Full time result"
+]
+
+corr_to_plot =
+  DF.new(
+    x: List.flatten(List.duplicate(names, corr_size)),
+    y: List.flatten(for name <- names, do: List.duplicate(name, corr_size)),
+    corr_val: Enum.map(correlation_list, fn x -> Float.round(x, 2) end)
+  )
+
+Vl.new(
+  title: [
+    text: "Correlation Matrix for Sports betting",
+    offset: 20
+  ],
+  width: 630,
+  height: 630
+)
+|> Vl.data_from_values(corr_to_plot)
+|> Vl.layers([
+  Vl.new()
+  |> Vl.mark(:rect)
+  |> Vl.encode_field(:x, "x", type: :nominal, title: "", sort: false)
+  |> Vl.encode_field(:y, "y", type: :nominal, title: "", sort: false)
+  |> Vl.encode_field(:color, "corr_val", type: :quantitative, scale: [scheme: :viridis]),
+  Vl.new()
+  |> Vl.mark(:text)
+  |> Vl.encode_field(:x, "x", type: :nominal, title: "")
+  |> Vl.encode_field(:y, "y", type: :nominal, title: "")
+  |> Vl.encode_field(:text, "corr_val", type: :quantitative)
+  |> Vl.encode_field(:color, "corr_val",
+    type: :quantitative,
+    condition: [
+      [test: "datum['corr_val'] < 0", value: :white],
+      [test: "datum['corr_val'] >= 0", value: :black]
+    ]
+  )
+])
+```
+
+```elixir
+model_lor = LOR.fit(x_train, y_train, num_classes: 3)
+```
+
+```elixir
+lor_predictions = LOR.predict(model_lor, x_test)
+lor_predictions_prob = LOR.predict_probability(model_lor, x_test)
+rmse = Regression.mean_square_error(y_test, lor_predictions) |> Nx.sqrt()
+mae = Regression.mean_absolute_error(y_test, lor_predictions)
+{rmse, mae}
+```
+
+```elixir
+model_lr = LR.fit(x_train, y_train)
+```
+
+```elixir
+lr_predictions = LR.predict(model_lr, x_test)
+rmse = Regression.mean_square_error(y_test, lr_predictions) |> Nx.sqrt()
+mae = Regression.mean_absolute_error(y_test, lr_predictions)
+{rmse, mae}
+```
+
+```elixir
+home_old_rating = 1328.5195744379325
+away_old_rating = 461.7643339278798
+odds_home_bet365 = 1.25
+odds_away_bet365 = 11
+odds_draw_bet365 = 6
+home_rating_delta = home_old_rating - away_old_rating
+away_rating_delta = away_old_rating - home_old_rating
+
+game =
+  Nx.tensor([
+    [
+      away_old_rating,
+      away_rating_delta,
+      home_old_rating,
+      home_rating_delta,
+      odds_away_bet365,
+      odds_draw_bet365,
+      odds_home_bet365
+    ]
+  ])
+
+LOR.predict(model_lor, game)
+```

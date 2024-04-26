@@ -1,0 +1,216 @@
+# Soccer Prediction Classifier
+
+```elixir
+Mix.install([
+  {:axon, "~> 0.6.0"},
+  {:nx, "~> 0.6.0", override: true},
+  {:exla, "~> 0.6.0"},
+  {:explorer, "~> 0.8.2"},
+  {:kino, "~> 0.10.0"},
+  {:adbc, "~>0.1"},
+  {:scholar, "~> 0.2.0"},
+  {:kino_vega_lite, "~> 0.1.9"},
+  {:axon_onnx, "~> 0.4.0"}
+])
+
+Nx.Defn.default_options(compiler: EXLA)
+Nx.global_default_backend(EXLA.Backend)
+
+alias Explorer.{DataFrame, Series}
+alias VegaLite, as: Vl
+```
+
+## Data Processing
+
+```elixir
+Adbc.download_driver!(:postgresql, uri: "postgresql://postgres:toorroot@localhost:5432/sports")
+
+{:ok, db} =
+  Kino.start_child(
+    {Adbc.Database,
+     driver: :postgresql, uri: "postgresql://postgres:toorroot@localhost:5432/sports"}
+  )
+
+{:ok, conn} = Kino.start_child({Adbc.Connection, database: db})
+
+# query to load data
+query =
+  "SELECT tseh.old_rating as home_old_rating, tsea.old_rating as away_old_rating, f.full_time_result, f.odds_home_bet365, f.odds_draw_bet365, f.odds_away_bet365
+FROM public.fixtures as f
+JOIN public.team_statistics as tsh
+ON f.home_team_id = tsh.team_id
+JOIN public.team_statistics as tsa
+ON f.away_team_id = tsa.team_id
+JOIN public.team_statistic_events as tseh
+ON f.id = tseh.fixture_id AND tsh.id = tseh.team_statistic_id
+JOIN public.team_statistic_events as tsea
+ON f.id = tsea.fixture_id AND tsa.id = tsea.team_statistic_id
+WHERE f.odds_home_bet365 IS NOT NULL
+AND f.odds_draw_bet365 IS NOT NULL
+AND f.odds_away_bet365 IS NOT NULL
+ORDER BY f.id"
+
+# When using the conn PID directly
+{:ok, df} = DataFrame.from_query(conn, query, [])
+```
+
+```elixir
+defmodule SportBetting.Data do
+  import Nx.Defn
+
+  def split_train_test(df, portion) do
+    num_examples = DataFrame.n_rows(df)
+    num_train = ceil(portion * num_examples)
+    num_test = num_examples - num_train
+
+    train = DataFrame.slice(df, 0, num_train)
+    test = DataFrame.slice(df, num_train, num_test)
+    {train, test}
+  end
+
+  def split_features_targets(df) do
+    features =
+      DataFrame.select(df, [
+        "home_old_rating",
+        "away_old_rating",
+        "odds_home_bet365",
+        "odds_draw_bet365",
+        "odds_away_bet365"
+      ])
+
+    targets = DataFrame.select(df, "full_time_result")
+    {features, targets}
+  end
+
+  def df_to_tensor(df) do
+    df
+    |> DataFrame.names()
+    |> Enum.map(&Series.to_tensor(df[&1]))
+    |> Nx.stack(axis: 1)
+  end
+
+  defn normalize_features(tensor) do
+    max =
+      tensor
+      |> Nx.abs()
+      |> Nx.reduce_max(axes: [0], keep_axes: true)
+
+    tensor / max
+  end
+end
+```
+
+```elixir
+{train_df, test_df} = SportBetting.Data.split_train_test(df, 0.8)
+{DataFrame.n_rows(train_df), DataFrame.n_rows(test_df)}
+```
+
+```elixir
+{train_features, train_targets} = SportBetting.Data.split_features_targets(train_df)
+{test_features, test_targets} = SportBetting.Data.split_features_targets(test_df)
+
+normalized_train_inputs =
+  train_features
+  |> SportBetting.Data.df_to_tensor()
+  |> SportBetting.Data.normalize_features()
+
+normalized_test_inputs =
+  test_features
+  |> SportBetting.Data.df_to_tensor()
+  |> SportBetting.Data.normalize_features()
+```
+
+```elixir
+mapping_result = %{
+  "H" => [1, 0, 0],
+  "D" => [0, 1, 0],
+  "A" => [0, 0, 1]
+}
+
+mapped_result =
+  Explorer.Series.transform(train_targets["full_time_result"], fn x ->
+    Map.fetch!(mapping_result, x)
+  end)
+
+train_targets = Explorer.DataFrame.new(full_time_result: mapped_result)
+
+mapped_result =
+  Explorer.Series.transform(test_targets["full_time_result"], fn x ->
+    Map.fetch!(mapping_result, x)
+  end)
+
+test_targets = Explorer.DataFrame.new(full_time_result: mapped_result)
+```
+
+```elixir
+train_targets = Nx.tensor(Explorer.Series.to_list(train_targets["full_time_result"]))
+test_targets = Nx.tensor(Explorer.Series.to_list(test_targets["full_time_result"]))
+```
+
+```elixir
+model =
+  Axon.input("input")
+  |> Axon.dense(256)
+  |> Axon.relu()
+  |> Axon.dense(256)
+  |> Axon.relu()
+  |> Axon.dropout(rate: 0.3)
+  |> Axon.dense(3, activation: :softmax)
+```
+
+```elixir
+batched_train_inputs = Nx.to_batched(normalized_train_inputs, 2048)
+batched_train_targets = Nx.to_batched(train_targets, 2048)
+batched_train = Stream.zip(batched_train_inputs, batched_train_targets)
+```
+
+```elixir
+loss =
+  &Axon.Losses.categorical_cross_entropy(
+    &1,
+    &2,
+    reduction: :mean
+  )
+
+optimizer = Polaris.Optimizers.adam(learning_rate: 1.0e-4)
+
+params =
+  model
+  |> Axon.Loop.trainer(loss, optimizer, log: 1)
+  |> Axon.Loop.run(batched_train, %{}, epochs: 30, compiler: EXLA)
+```
+
+```elixir
+batched_test_inputs = Nx.to_batched(normalized_test_inputs, 2048)
+batched_test_targets = Nx.to_batched(test_targets, 2048)
+batched_test = Stream.zip(batched_test_inputs, batched_test_targets)
+```
+
+```elixir
+model
+|> Axon.Loop.evaluator()
+|> Axon.Loop.metric(:accuracy, "acc")
+|> Axon.Loop.metric(:precision, "pre")
+|> Axon.Loop.metric(:true_positives, "tp", :running_sum)
+|> Axon.Loop.metric(:true_negatives, "tn", :running_sum)
+|> Axon.Loop.metric(:false_positives, "fp", :running_sum)
+|> Axon.Loop.metric(:false_negatives, "fn", :running_sum)
+|> Axon.Loop.run(batched_test, params, compiler: EXLA)
+```
+
+```elixir
+games = Enum.at(batched_test_inputs, 0)
+
+predictions =
+  Axon.predict(model, params, games)
+  |> Nx.argmax(axis: 1)
+
+true_results =
+  Enum.at(batched_test_targets, 0)
+  |> Nx.argmax(axis: 1)
+```
+
+```elixir
+template = Nx.to_template(normalized_test_inputs)
+AxonOnnx.export(model, template, params)
+```
